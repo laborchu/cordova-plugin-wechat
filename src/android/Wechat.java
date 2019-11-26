@@ -1,13 +1,22 @@
 package xu.li.cordova.wechat;
 
+import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.net.Uri;
+import android.net.http.SslError;
 import android.os.Environment;
 import android.util.Base64;
 import android.util.Log;
+import android.webkit.SslErrorHandler;
 import android.webkit.URLUtil;
+import android.webkit.WebChromeClient;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 
 import com.tencent.mm.opensdk.modelbiz.WXLaunchMiniProgram;
 import com.tencent.mm.opensdk.modelmsg.SendAuth;
@@ -103,6 +112,7 @@ public class Wechat extends CordovaPlugin {
     protected static IWXAPI wxAPI;
 
     protected String appId;
+    private static boolean h5Paying = false;
 
     @Override
     protected void pluginInitialize() {
@@ -130,6 +140,7 @@ public class Wechat extends CordovaPlugin {
 
     /**
      * Get weixin api
+     *
      * @param ctx
      * @return
      */
@@ -151,7 +162,7 @@ public class Wechat extends CordovaPlugin {
 
         if (action.equals("share")) {
             return share(args, callbackContext);
-        } else if(action.equals("openMiniPrograme")){
+        } else if (action.equals("openMiniPrograme")) {
             return openMiniProgram(args, callbackContext);
         } else if (action.equals("sendAuthRequest")) {
             return sendAuthRequest(args, callbackContext);
@@ -159,7 +170,7 @@ public class Wechat extends CordovaPlugin {
             return sendPaymentRequest(args, callbackContext);
         } else if (action.equals("isWXAppInstalled")) {
             return isInstalled(callbackContext);
-        }else if (action.equals("chooseInvoiceFromWX")){
+        } else if (action.equals("chooseInvoiceFromWX")) {
             return chooseInvoiceFromWX(args, callbackContext);
         }
 
@@ -273,9 +284,11 @@ public class Wechat extends CordovaPlugin {
             public void run() {
 
                 try {
-                    req.userName = message.getString(KEY_ARG_MESSAGE_MEDIA_USERNAME);; // 填小程序原始id
-                    req.path = message.getString(KEY_ARG_MESSAGE_MEDIA_PATH);; // 填小程序原始id起小程序页面的可带参路径，不填默认拉起小程序首页
-                    switch (message.getInt(KEY_ARG_MESSAGE_MEDIA_PROGRAMTYPE)){
+                    req.userName = message.getString(KEY_ARG_MESSAGE_MEDIA_USERNAME);
+                    ; // 填小程序原始id
+                    req.path = message.getString(KEY_ARG_MESSAGE_MEDIA_PATH);
+                    ; // 填小程序原始id起小程序页面的可带参路径，不填默认拉起小程序首页
+                    switch (message.getInt(KEY_ARG_MESSAGE_MEDIA_PROGRAMTYPE)) {
                         case WXMiniProgramObject.MINIPTOGRAM_TYPE_RELEASE:
                             req.miniprogramType = WXMiniProgramObject.MINIPTOGRAM_TYPE_RELEASE;
                             break;
@@ -359,16 +372,128 @@ public class Wechat extends CordovaPlugin {
             return true;
         }
 
-        PayReq req = new PayReq();
+        try {
+            final String orderStr = params.getString("mwebUrl");
+            if (orderStr != null) {
+                cordova.getActivity().runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        jumpWxByOrderUrl(cordova.getActivity(), orderStr);
+                    }
+                });
+                sendNoResultPluginResult(callbackContext);
+            } else {
+                PayReq req = new PayReq();
+                req.appId = getAppId();
+                req.partnerId = params.has("mch_id") ? params.getString("mch_id") : params.getString("partnerid");
+                req.prepayId = params.has("prepay_id") ? params.getString("prepay_id") : params.getString("prepayid");
+                req.nonceStr = params.has("nonce") ? params.getString("nonce") : params.getString("noncestr");
+                req.timeStamp = params.getString("timestamp");
+                req.sign = params.getString("sign");
+                req.packageValue = "Sign=WXPay";
+                if (api.sendReq(req)) {
+                    Log.i(TAG, "Payment request has been sent successfully.");
+                    // send no result
+                    sendNoResultPluginResult(callbackContext);
+                } else {
+                    Log.i(TAG, "Payment request has been sent unsuccessfully.");
+                    // send error
+                    callbackContext.error(ERROR_SEND_REQUEST_FAILED);
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, e.getMessage());
+            callbackContext.error(ERROR_INVALID_PARAMETERS);
+            return true;
+        }
+        return true;
+    }
+
+    /**
+     * 调起微信客户端发起支付
+     *
+     * @param context  上下文
+     * @param orderUrl 服务器下完单微信返回的订单地址
+     */
+    public static void jumpWxByOrderUrl(final Activity context, final String orderUrl) {
+        final WebView webView = new WebView(context);
+        WebSettings webSettings = webView.getSettings();
+        webSettings.setSupportZoom(true);
+        webSettings.setAppCacheEnabled(false);
+        webSettings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        webSettings.setAllowFileAccess(true);
+        webSettings.setDefaultTextEncodingName("utf-8");
+        webSettings.setJavaScriptEnabled(true);
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onReceivedTitle(WebView view, String title) {
+                super.onReceivedTitle(view, title);
+            }
+
+        });
+        webView.setWebViewClient(new WebViewClient() {
+            public boolean shouldOverrideUrlLoading(WebView view, String newUrl) {
+                Uri uri = Uri.parse(newUrl);
+                if ("weixin".equals(uri.getScheme())) {
+                    //用浏览器打开中转地址，调起微信客户端发起支付
+                    Intent intent = new Intent(Intent.ACTION_VIEW);
+                    intent.setData(uri);
+                    context.startActivity(intent);
+                    h5Paying = true;
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+
+            @Override
+            public void onReceivedError(WebView view, int errorCode,
+                                        String description, String failingUrl) {
+                super.onReceivedError(view, errorCode, description, failingUrl);
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+
+            }
+
+            @Override
+            public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
+                //部分手机浏览器不支持https，所以此处需要接受证书
+                handler.proceed();
+            }
+
+        });
+        //部分机型调不起打开微信中转页面，所以这里利用js代码来加载订单地址
+        String html = "<script>window.location.href='" + orderUrl + "';</script>";
+        webView.loadDataWithBaseURL("http://pay.tysu.com.cn", html, "text/html", "utf-8", null);
+
+    }
+
+    protected boolean chooseInvoiceFromWX(CordovaArgs args, CallbackContext callbackContext) {
+
+        final IWXAPI api = getWxAPI(cordova.getActivity());
+
+        // check if # of arguments is correct
+        final JSONObject params;
+        try {
+            params = args.getJSONObject(0);
+        } catch (JSONException e) {
+            callbackContext.error(ERROR_INVALID_PARAMETERS);
+            return true;
+        }
+
+        ChooseCardFromWXCardPackage.Req req = new ChooseCardFromWXCardPackage.Req();
 
         try {
             req.appId = getAppId();
-            req.partnerId = params.has("mch_id") ? params.getString("mch_id") : params.getString("partnerid");
-            req.prepayId = params.has("prepay_id") ? params.getString("prepay_id") : params.getString("prepayid");
-            req.nonceStr = params.has("nonce") ? params.getString("nonce") : params.getString("noncestr");
-            req.timeStamp = params.getString("timestamp");
-            req.sign = params.getString("sign");
-            req.packageValue = "Sign=WXPay";
+            req.cardType = "INVOICE";
+            req.signType = params.getString("signType");
+            req.cardSign = params.getString("cardSign");
+            req.nonceStr = params.getString("nonceStr");
+            req.timeStamp = params.getString("timeStamp");
+            req.canMultiSelect = "1";
         } catch (Exception e) {
             Log.e(TAG, e.getMessage());
 
@@ -377,12 +502,12 @@ public class Wechat extends CordovaPlugin {
         }
 
         if (api.sendReq(req)) {
-            Log.i(TAG, "Payment request has been sent successfully.");
+            Log.i(TAG, "Invoice request has been sent successfully.");
 
             // send no result
             sendNoResultPluginResult(callbackContext);
         } else {
-            Log.i(TAG, "Payment request has been sent unsuccessfully.");
+            Log.i(TAG, "Invoice request has been sent unsuccessfully.");
 
             // send error
             callbackContext.error(ERROR_SEND_REQUEST_FAILED);
@@ -390,51 +515,6 @@ public class Wechat extends CordovaPlugin {
 
         return true;
     }
-
-   protected boolean chooseInvoiceFromWX(CordovaArgs args, CallbackContext callbackContext) {
-
-               final IWXAPI api = getWxAPI(cordova.getActivity());
-
-               // check if # of arguments is correct
-               final JSONObject params;
-               try {
-                   params = args.getJSONObject(0);
-               } catch (JSONException e) {
-                   callbackContext.error(ERROR_INVALID_PARAMETERS);
-                   return true;
-               }
-
-               ChooseCardFromWXCardPackage.Req req = new ChooseCardFromWXCardPackage.Req();
-
-               try {
-                   req.appId = getAppId();
-                   req.cardType = "INVOICE";
-                   req.signType = params.getString("signType");
-                   req.cardSign = params.getString("cardSign");
-                   req.nonceStr = params.getString("nonceStr");
-                   req.timeStamp = params.getString("timeStamp");
-                   req.canMultiSelect = "1";
-               } catch (Exception e) {
-                   Log.e(TAG, e.getMessage());
-
-                   callbackContext.error(ERROR_INVALID_PARAMETERS);
-                   return true;
-               }
-
-               if (api.sendReq(req)) {
-                   Log.i(TAG, "Invoice request has been sent successfully.");
-
-                   // send no result
-                   sendNoResultPluginResult(callbackContext);
-               } else {
-                   Log.i(TAG, "Invoice request has been sent unsuccessfully.");
-
-                   // send error
-                   callbackContext.error(ERROR_SEND_REQUEST_FAILED);
-               }
-
-               return true;
-           }
 
     protected boolean isInstalled(CallbackContext callbackContext) {
         final IWXAPI api = getWxAPI(cordova.getActivity());
@@ -529,7 +609,7 @@ public class Wechat extends CordovaPlugin {
                 case TYPE_WECHAT_OPENMINIPROGRAME:
                     WXMiniProgramObject miniProgramObj = new WXMiniProgramObject();
                     miniProgramObj.webpageUrl = media.getString(KEY_ARG_MESSAGE_MEDIA_WEBPAGEURL);// 兼容低版本的网页链接
-                    switch (media.getInt(KEY_ARG_MESSAGE_MEDIA_PROGRAMTYPE)){
+                    switch (media.getInt(KEY_ARG_MESSAGE_MEDIA_PROGRAMTYPE)) {
                         case WXMiniProgramObject.MINIPTOGRAM_TYPE_RELEASE:
                             miniProgramObj.miniprogramType = WXMiniProgramObject.MINIPTOGRAM_TYPE_RELEASE;
                             break;
@@ -540,8 +620,8 @@ public class Wechat extends CordovaPlugin {
                             miniProgramObj.miniprogramType = WXMiniProgramObject.MINIPROGRAM_TYPE_PREVIEW;
                             break;
                     }// 正式版:0，测试版:1，体验版:2
-                    miniProgramObj.userName =  media.getString(KEY_ARG_MESSAGE_MEDIA_USERNAME);     // 小程序原始id
-                    miniProgramObj.path =  media.getString(KEY_ARG_MESSAGE_MEDIA_PATH);             //小程序页面路径
+                    miniProgramObj.userName = media.getString(KEY_ARG_MESSAGE_MEDIA_USERNAME);     // 小程序原始id
+                    miniProgramObj.path = media.getString(KEY_ARG_MESSAGE_MEDIA_PATH);             //小程序页面路径
                     mediaObject = miniProgramObj;
                     break;
 
@@ -701,6 +781,7 @@ public class Wechat extends CordovaPlugin {
 
     /**
      * Get saved app id
+     *
      * @param ctx
      * @return
      */
@@ -711,12 +792,13 @@ public class Wechat extends CordovaPlugin {
 
     /**
      * Save app id into SharedPreferences
+     *
      * @param ctx
      * @param id
      */
     public static void saveAppId(Context ctx, String id) {
         if (id.isEmpty()) {
-            return ;
+            return;
         }
 
         SharedPreferences settings = ctx.getSharedPreferences(PREFS_NAME, 0);
@@ -737,5 +819,13 @@ public class Wechat extends CordovaPlugin {
         PluginResult result = new PluginResult(PluginResult.Status.NO_RESULT);
         result.setKeepCallback(true);
         callbackContext.sendPluginResult(result);
+    }
+
+    @Override
+    public void onResume(boolean multitasking) {
+        if (h5Paying) {
+            currentCallbackContext.success();
+        }
+        h5Paying = false;
     }
 }
