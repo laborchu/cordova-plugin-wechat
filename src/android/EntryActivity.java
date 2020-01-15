@@ -123,6 +123,7 @@ public class EntryActivity extends Activity implements IWXAPIEventHandler {
     }
 
     protected void startMainActivity() {
+        finish();
         Intent intent = new Intent();
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         intent.setPackage(getApplicationContext().getPackageName());
